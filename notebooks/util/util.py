@@ -67,7 +67,8 @@ def route_random_flow(
         max_units : float,
         eoh : int,
         max_len : int = None,
-        seed : int = None):
+        seed : int = None,
+        max_wait : int = None):
     # Seed the RNG
     if seed is not None:
         np.random.seed(seed)
@@ -82,12 +83,23 @@ def route_random_flow(
     # Build the path
     path = []
     next_nodes = [start_node]
+    nwaits = 0
     for _ in range(n_steps):
         # Pick a random node
         node = np.random.choice(next_nodes, 1)[0]
         path.append((tme, node.index))
+        # Count waits
+        if node.index == path[-1][1]:
+            nwaits += 1
+        else:
+            nwaits = 0
         # Determine the next nodes
         next_nodes = node.successors()
+        if max_wait is not None and nwaits >= max_wait:
+            next_nodes = [n for n in next_nodes if n.index != node.index]
+        # Stop if there are no viable successors
+        if len(next_nodes) == 0:
+            break
         # Advance time
         tme += 1
     return n_units, path
@@ -101,7 +113,8 @@ def build_random_paths(
         max_units : float,
         eoh : int,
         max_len : int = None,
-        seed : int = None):
+        seed : int = None,
+        max_wait : int = None):
     """
     """
     # Seed the RNG
@@ -112,17 +125,19 @@ def build_random_paths(
     # Prepare a data structure for the results
     flows, paths = [], []
     # Route flow units along the paths
-    for _ in range(n_paths):
+    for i in range(n_paths):
         # Pick a random start node
         start_node = np.random.choice(graph.vs, 1)[0]
         # Route a random path
+        ls = None if seed is None else seed + i
         n_units, path = route_random_flow(
             start_node=start_node,
             min_units=min_units,
             max_units=max_units,
             eoh=eoh,
             max_len=max_len,
-            seed=None)
+            seed=ls,
+            max_wait=max_wait)
         flows.append(n_units)
         paths.append(path)
     return flows, paths
@@ -159,14 +174,17 @@ def get_counts(
     return node_counts, arc_counts
 
 
-def add_proportional_noise(node_counts, arc_counts, sigma):
+def add_proportional_noise(node_counts_in, arc_counts_in, sigma, seed=None):
     """
     """
     # Add noise to the node counts
-    for k, v in node_counts.items():
+    node_counts = {}
+    for k, v in node_counts_in.items():
         node_counts[k] = max(0, v * (1 + np.random.normal(0, sigma)))
     # Add noise to the arc counts
-    for k, v in arc_counts.items():
+    arc_counts = {}
+    np.random.seed(seed)
+    for k, v in arc_counts_in.items():
         arc_counts[k] = max(0, v * (1 + np.random.normal(0, sigma)))
     return node_counts, arc_counts
 
@@ -194,68 +212,119 @@ def build_time_unfolded_graph(
     return res
 
 
-def apply_weights(
-        tug : ig.Graph,
-        node_weights : dict,
-        arc_weights : dict):
-    """
-    """
-    # Makde a copy of the graph
-    res = copy.deepcopy(tug)
-    # Store node counts as vertex weights
-    for v in res.vs:
-        v['weight'] = node_weights[(v['time'], v['index_o'])]
-    # Store arc counts as edge weights
-    for e in res.es:
-        e['weight'] = arc_weights[(e['time'], e['source_o'], e['target_o'])]
-    return res
+# def apply_weights(
+#         tug : ig.Graph,
+#         node_weights : dict,
+#         arc_weights : dict):
+#     """
+#     """
+#     # Makde a copy of the graph
+#     res = copy.deepcopy(tug)
+#     # Store node counts as vertex weights
+#     for v in res.vs:
+#         v['weight'] = node_weights[(v['time'], v['index_o'])]
+#     # Store arc counts as edge weights
+#     for e in res.es:
+#         e['weight'] = arc_weights[(e['time'], e['source_o'], e['target_o'])]
+#     return res
 
 
-def get_visual_style(graph, weight_scale=5):
+def get_visual_style(
+        graph : ig.Graph,
+        vertex_weights = None,
+        edge_weights = None):
     """
     """
     res = {}
+    cl, cu = 0.1, 0.9
+    # Rescale weights
+    if vertex_weights is not None:
+        u = np.max(np.abs(list(vertex_weights.values())))
+        vw = {k: np.clip((v+u) / (2*u), cl, cu)
+                for k, v in vertex_weights.items()}
+    if edge_weights is not None:
+        u = np.max(np.abs(list(edge_weights.values())))
+        ew = {k: np.clip((v+u) / (2*u), cl, cu)
+                for k, v in edge_weights.items()}
     # Define color map
-    cmap = cm.get_cmap('Set3')
+    if vertex_weights is None:
+        cmap = cm.get_cmap('Set3')
+    else:
+        cmap = cm.get_cmap('coolwarm')
     # Handle unfolded graphs
     if 'unfolded' in graph.attributes() and graph['unfolded']:
         # Disable automatic curving
         res['autocurve'] = False
-        # Define the labels
-        res['vertex_label'] = [f'{n["time"], n["index_o"]}'
-                for n in graph.vs]
-        # Define the layout
+        # Layout height
         height = max(graph.vs['index_o'])
-        coords = [(n['time'],
-                   n['index_o'] if n['index_o'] >= 0 else 0.5 * height)
-                   for n in graph.vs]
+        # Build vertex attributes
+        res['vertex_label'] = []
+        res['vertex_color'] = []
+        coords = []
+        for n in graph.vs:
+            t, i = n['time'], n['index_o']
+            # Vertex labels
+            res['vertex_label'].append(f'{t},{i}')
+            # Coordinates
+            if i >= 0: coords.append((t, i))
+            else: coords.append((-1, 0.5 * height))
+            # Color
+            if vertex_weights is not None:
+                if (t, i) in vw:
+                    res['vertex_color'].append(cmap(vw[(t, i)]))
+                else:
+                    res['vertex_color'].append(cmap(0.5))
+            else:
+                if i >= 0:
+                    res['vertex_color'].append(cmap(i))
+                else:
+                    res['vertex_color'].append('#BBB')
+        # Setup the layout
         res['layout'] = ig.Layout(coords=coords)
-        # Define the vertex colors
-        res['vertex_color'] = [(cmap(n['index_o'])
-            if n['index_o'] >= 0 else '#BBB')
-            for n in graph.vs]
+        # Define the edge colors
+        if edge_weights is not None:
+            res['edge_color'] = []
+            for e in graph.es:
+                t, i, j = e['time'], e['source_o'], e['target_o']
+                if (t, i, j) in ew:
+                    res['edge_color'].append(cmap(ew[(t, i, j)]))
+                else:
+                    res['edge_color'].append(cmap(0.5))
     else:
         # Define the labels
         res['vertex_label'] = [f'{n.index}' for n in graph.vs]
         # Define the layout
         res['layout'] = graph.layout('kk')
         # Define the vertex colors
-        res['vertex_color'] = [cmap(n.index) for n in graph.vs]
+        if vertex_weights is None:
+            res['vertex_color'] = [cmap(n.index) for n in graph.vs]
+        else:
+            res['vertex_color'] = [cmap(ew[n.index]) for n in graph.vs]
+        # Define the edge colors
+        if edge_weights is not None:
+            res['edge_color'] = []
+            for e in graph.es:
+                i, j = e['source'], e['target']
+                res['edge_color'].append(cmap(ew[(t, i, j)]))
     # Choose the vertex label size
     res['vertex_label_size'] = 10
     res['vertex_size'] = 30
-    # Define the edge width
-    if 'weight' in graph.es.attributes():
-        max_wgt = max(e['weight'] for e in graph.es)
-        min_wgt = min(e['weight'] for e in graph.es)
-        scale = weight_scale / max_wgt
-        res['edge_width'] = [max(1, (e['weight']-min_wgt) * scale)
-                for e in graph.es]
-        res['edge_color'] = ['#000' if e['weight'] > 0 else '#BBB'
-                for e in graph.es]
-    else:
-        res['edge_width'] = 1
-        res['edge_arrow_size'] = 1
+
+
+
+
+    # # Define the edge width
+    # if 'weight' in graph.es.attributes():
+    #     max_wgt = max(e['weight'] for e in graph.es)
+    #     min_wgt = min(e['weight'] for e in graph.es)
+    #     scale = weight_scale / max_wgt
+    #     res['edge_width'] = [max(1, (e['weight']-min_wgt) * scale)
+    #             for e in graph.es]
+    #     res['edge_color'] = ['#000' if e['weight'] > 0 else '#BBB'
+    #             for e in graph.es]
+    # else:
+    #     res['edge_width'] = 1
+    #     res['edge_arrow_size'] = 1
     # Define the node size
     # res['vertex_size'] = 1.0
     # Assign the visual style
@@ -624,7 +693,6 @@ def _paths_by_node_and_arc(tug, paths):
 
 def consolidate_paths(
         tug : ig.Graph,
-        flows : list,
         paths : list,
         node_counts : dict,
         arc_counts : dict,
@@ -668,15 +736,11 @@ def consolidate_paths(
     #         # Update the last node
     #         last = nk
     # Define the reconstruction error constraints for all nodes
-    for n in paths_by_node:
-        # Get the paths for the node
-        p = paths_by_node[n]
+    for n, p in paths_by_node.items():
         # Define the constraint
         slv.Add(sum(x[j] for j in p) == node_counts[n])
     # Define the reconstruction error constraints for all arcs
-    for a in paths_by_arc:
-        # Get the paths for the arc
-        p = paths_by_arc[a]
+    for a, p in paths_by_arc.items():
         # Define the constraint
         slv.Add(sum(x[j] for j in p) == arc_counts[a])
     # Define the objective
@@ -839,8 +903,9 @@ def solve_path_selection_full(
 
 
 def print_solution(tug, flows, paths,
-        use_unfolded_indexes=False,
-        sort=None):
+        use_unfolded_indexes : bool = False,
+        sort=None,
+        max_paths : int = None):
     """
     """
     assert(tug['unfolded'])
@@ -856,12 +921,15 @@ def print_solution(tug, flows, paths,
     flows = [flows[i] for i in sidx]
     paths = [paths[i] for i in sidx]
     # Print the solution
-    for f, p in zip(flows, paths):
+    for i, (f, p) in enumerate(zip(flows, paths)):
         if use_unfolded_indexes:
             ps = [f'{v}' for v in p]
         else:
             ps = [f'{tug.vs[v]["time"]},{tug.vs[v]["index_o"]}' for v in p]
         print(f'{f:.2f}: {" > ".join(ps)}')
+        if max_paths is not None and i+1 >= max_paths:
+            print('...')
+            break
 
 
 def print_ground_truth(flows, paths, sort=None):
@@ -925,8 +993,8 @@ def solve_pricing_problem_maxwaits(
         paths : list,
         node_counts,
         arc_counts,
-        max_waits : int,
-        filter_paths : bool = False,
+        max_waits : int = None,
+        filter_paths : bool = True,
         prec : float = 1e-3,
         alpha : float = 0,
         cover_duals : list = None,
@@ -957,8 +1025,6 @@ def solve_pricing_problem_maxwaits(
     minwgt = min(nres.values()) + min(ares.values())
     maxwgt = max(nres.values()) + max(ares.values())
 
-    # Solve the shortest path problem with maximum wait
-    mdl = cp_model.CpModel()
     # Quick access to some useful parameters
     eoh = tug['eoh'] # end of horizon
     mni = max(tug.vs['index_o']) # max node index in the original graph
@@ -1000,13 +1066,14 @@ def solve_pricing_problem_maxwaits(
         # Build a table constraint
         mdl.AddAllowedAssignments([x[t-1], x[t], c[t]], alw)
     # Add the forbidden transitions
-    for t in range(max_waits, eoh):
-        # Buid the forbidden tuples
-        frb = [tuple([i] * (max_waits+1)) for i in range(mni+1)]
-        # Build the scope
-        scope = [x[h] for h in range(t-max_waits, t+1)]
-        # Add the constraint
-        mdl.AddForbiddenAssignments(scope, frb)
+    if max_waits is not None:
+        for t in range(max_waits, eoh):
+            # Buid the forbidden tuples
+            frb = [tuple([i] * (max_waits+1)) for i in range(mni+1)]
+            # Build the scope
+            scope = [x[h] for h in range(t-max_waits, t+1)]
+            # Add the constraint
+            mdl.AddForbiddenAssignments(scope, frb)
     # Add the objective
     mdl.Add(z == sum(c[i] for i in range(1, eoh)))
     if optimize:
@@ -1065,13 +1132,19 @@ def trajectory_extraction_cg(
         arc_counts : dict,
         max_iter : int,
         max_paths_per_iter : int = None,
-        approximate_sol : bool = False,
         alpha : float = 0,
         min_vertex_cover : float = None,
-        verbose : int = 0):
+        max_waits : int = None,
+        pricing_time_limit : float = None,
+        force_lcg_pricing : bool = False,
+        verbose : int = 0,
+        return_history : bool = False):
     """
     """
     assert(tug['unfolded'])
+    assert(max_waits is None or max_waits >= 1)
+    # Quick access to some useful parameters
+    eoh = tug['eoh'] # end of horizon
     # Build an initial solution (one path per node)
     paths = [[v.index] for v in tug.vs]
     # Start the main loop
@@ -1082,7 +1155,7 @@ def trajectory_extraction_cg(
         master = PathSelectionSolver(tug, node_counts, arc_counts,
                 alpha=alpha, min_vertex_cover=min_vertex_cover)
         # Solve the master problem
-        sol = master.solve(paths, verbose=0, polish=not approximate_sol)
+        sol = master.solve(paths, verbose=0, polish=True)
         # Convert the solution to paths
         sol_flows, sol_paths = master.sol_to_paths()
         # Compute the error (just for tracking)
@@ -1095,22 +1168,28 @@ def trajectory_extraction_cg(
         else:
             cover_duals = None
         # Solve the pricing problem
-        npc, np = solve_pricing_problem(tug, sol_flows, sol_paths,
-                node_counts, arc_counts,
-                alpha=alpha, cover_duals=cover_duals)
-        # Limit the number of new paths, if needed
-        if max_paths_per_iter is not None:
-            np = np[:max_paths_per_iter]
-        # Update the path pool
-        npaths_old = len(paths)
-        if approximate_sol: # in this case, we need to discard duplicates
-            tmp = set([tuple(p) for p in paths])
-            tmp2 = set([tuple(p) for p in np])
-            tmp3 = tmp.union(tmp2)
-            paths = [list(p) for p in tmp3]
+        if (max_waits is None or max_waits >= eoh) and not force_lcg_pricing:
+            npc, np = solve_pricing_problem(tug, sol_flows, sol_paths,
+                    node_counts, arc_counts,
+                    alpha=alpha, cover_duals=cover_duals)
+            # Limit the number of new paths, if needed
+            if max_paths_per_iter is not None:
+                np = np[:max_paths_per_iter]
         else:
-            paths += np
-        nnew = len(paths) - npaths_old
+            npc, np = solve_pricing_problem_maxwaits(tug, sol_flows, sol_paths,
+                    node_counts, arc_counts,
+                    alpha=alpha, cover_duals=cover_duals,
+                    max_waits=max_waits, max_paths=max_paths_per_iter,
+                    time_limit=pricing_time_limit)
+        # Update the path pool (discarding duplicates)
+        # NOTE this is necessary since sometimes the polishing step fails
+        # and therefore we need to deal with an approximate solution
+        nold = len(paths)
+        old_as_set = set([tuple(p) for p in paths])
+        found_as_set = set([tuple(p) for p in np])
+        new_as_set = old_as_set.union(found_as_set)
+        paths = [list(p) for p in new_as_set]
+        nnew = len(paths) - nold
         # Print some informtion
         if verbose > 0:
             print(f'It.{it}, sse: {sse:.2f}, #paths: {len(paths)}, new: {nnew}')
@@ -1119,7 +1198,10 @@ def trajectory_extraction_cg(
             break
         # print('PATHS', sorted(paths))
     # Return the solution
-    return sol_flows, sol_paths
+    res = [sol_flows, sol_paths]
+    if return_history:
+        res.append(sse_history)
+    return res
 
 
 def get_reconstruction_error(
@@ -1135,3 +1217,18 @@ def get_reconstruction_error(
     nres, ares = _get_residuals(tug, flows, paths, node_counts, arc_counts)
     # Compute the reconstruction error
     return sum(nres[n]**2 for n in nres) + sum(ares[a]**2 for a in ares)
+
+
+def get_default_benchmark_graph(
+        nnodes : int,
+        eoh : int,
+        seed : int = None,
+        sigma : float = None):
+    g = build_website_graph(nnodes=nnodes, rate=3, extra_arc_fraction=0.25, seed=seed)
+    flows, paths = build_random_paths(g, min_paths=3, max_paths=5,
+                                           min_units=1, max_units=10, eoh=eoh, seed=seed)
+    tug = build_time_unfolded_graph(g, eoh=eoh)
+    nc, ac = get_counts(tug, flows, paths)
+    if sigma is not None:
+        nc, ac = add_proportional_noise(nc, ac, sigma=sigma)
+    return g, tug, flows, paths, nc, ac
