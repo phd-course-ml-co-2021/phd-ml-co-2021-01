@@ -3,10 +3,6 @@ title: MindIt Presentation 2021-11-04
 author: michele.lombardi2@unibo.it
 ---
 
-# Health Domain Problems #
-
-
-
 # Accessing the Lecture #
 
 ## Local Execution (Preferred) ##
@@ -18,7 +14,7 @@ Students are strongly encouraged to _run all lectures locally_. Doing this will 
 instructions](https://docs.docker.com/compose/install/)
 * Clone the repository with the tutorial, in this case via the command:
 ```sh
-git clone https://github.com/lompabo/aiiti-01-2021.git
+git clone https://github.com/phd-course-ml-co-2021/phd-ml-co-2021-01.git
 ```
 * Start the container via Docker Compose, from the main directory of the
 tutorial:
