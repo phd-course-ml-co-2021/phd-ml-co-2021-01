@@ -1,5 +1,5 @@
 ---
-title: MindIt Presentation 2021-11-04
+title: Machine Learnign and Constrained Optimization (Part 1)
 author: michele.lombardi2@unibo.it
 ---
 
